@@ -1,0 +1,1303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Whispers of the Tower</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; font-family: 'Georgia', serif; }
+canvas { display: block; }
+
+#overlay {
+  position: fixed; inset: 0;
+  background: radial-gradient(ellipse at center, #1a0010 0%, #000 70%);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  color: #bbb; z-index: 100;
+}
+#overlay h1 {
+  font-size: clamp(2em, 5vw, 3.8em);
+  color: #8b0000;
+  text-shadow: 0 0 30px #ff000088, 0 0 80px #ff000033;
+  margin-bottom: 10px; letter-spacing: 5px;
+}
+#overlay .sub {
+  font-size: 1.05em; color: #666; font-style: italic; margin-bottom: 35px;
+}
+.ctrl-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 8px 40px; margin: 10px 0; font-size: 0.9em; color: #888;
+}
+.ctrl-grid span { color: #cc8822; }
+#enter-btn {
+  margin-top: 30px; padding: 13px 55px;
+  background: transparent; border: 1px solid #550000;
+  color: #aa3333; font-size: 1.15em; cursor: pointer;
+  font-family: 'Georgia', serif; letter-spacing: 3px;
+  transition: all 0.3s;
+}
+#enter-btn:hover {
+  background: #44000022; color: #ff5555;
+  border-color: #aa0000; box-shadow: 0 0 25px #aa000033;
+}
+
+#hud {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  padding: 10px 18px; display: flex; justify-content: space-between;
+  color: rgba(170,150,130,0.7); font-size: 0.78em;
+  pointer-events: none; text-shadow: 1px 1px 4px #000;
+}
+#crosshair {
+  position: fixed; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  color: rgba(255,255,255,0.35); font-size: 22px;
+  pointer-events: none; line-height: 1;
+}
+#prompt {
+  position: fixed; top: 57%; left: 50%;
+  transform: translateX(-50%);
+  color: #ddbb55; font-size: 0.92em;
+  pointer-events: none; opacity: 0;
+  transition: opacity 0.2s; text-shadow: 1px 1px 4px #000;
+}
+#pause-msg {
+  position: fixed; inset: 0;
+  display: none; align-items: center; justify-content: center;
+  color: #888; font-size: 1.4em;
+  background: rgba(0,0,0,0.55); z-index: 50;
+  pointer-events: none;
+}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="overlay">
+  <h1>⛧ WHISPERS OF THE TOWER ⛧</h1>
+  <p class="sub">Something ancient stirs within the dark…</p>
+  <div class="ctrl-grid">
+    <div><span>WASD / Arrows</span> — Move</div>
+    <div><span>Mouse</span> — Look</div>
+    <div><span>Shift</span> — Run</div>
+    <div><span>Ctrl</span> — Sneak</div>
+    <div><span>E</span> — Interact / Open doors</div>
+    <div><span>Esc</span> — Pause</div>
+  </div>
+  <button id="enter-btn">ENTER THE TOWER</button>
+</div>
+
+<div id="hud">
+  <span id="floor-name"></span>
+  <span id="move-mode"></span>
+</div>
+<div id="crosshair">+</div>
+<div id="prompt"></div>
+<div id="pause-msg">— PAUSED — click to resume —</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+// ─────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────
+const PLAYER_H   = 1.72;   // eye height
+const SNEAK_H    = 1.05;
+const P_RADIUS   = 0.35;
+const WALK_SPD   = 4.5;
+const RUN_SPD    = 9.5;
+const SNEAK_SPD  = 1.8;
+
+const TW   = 9;    // tower half-width (interior: ±(TW-1))
+const WT   = 1;    // wall thickness
+const FH   = 4.6;  // floor height
+const FT   = 0.2;  // floor slab thickness
+
+// ─────────────────────────────────────────────────────────────────
+// Renderer
+// ─────────────────────────────────────────────────────────────────
+const canvas   = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+renderer.toneMapping       = THREE.ReinhardToneMapping;
+renderer.toneMappingExposure = 0.28;
+
+// ─────────────────────────────────────────────────────────────────
+// Scene & fog
+// ─────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05050d);
+scene.fog = new THREE.FogExp2(0x05050d, 0.032);
+
+// ─────────────────────────────────────────────────────────────────
+// Camera & controls
+// ─────────────────────────────────────────────────────────────────
+const camera   = new THREE.PerspectiveCamera(74, innerWidth / innerHeight, 0.05, 180);
+camera.position.set(0, PLAYER_H, 18);   // start outside south gate
+const controls = new PointerLockControls(camera, canvas);
+
+// ─────────────────────────────────────────────────────────────────
+// Procedural textures
+// ─────────────────────────────────────────────────────────────────
+function clamp(v, lo = 0, hi = 255) { return Math.max(lo, Math.min(hi, v)); }
+
+function makeStone(sz = 256, brightness = 65) {
+  const cv  = document.createElement('canvas');
+  cv.width  = cv.height = sz;
+  const ctx = cv.getContext('2d');
+  const bw  = sz / 4, bh = sz / 3;
+  ctx.fillStyle = `rgb(${brightness},${brightness - 5},${brightness - 10})`;
+  ctx.fillRect(0, 0, sz, sz);
+  for (let row = 0; row < 6; row++) {
+    for (let col = 0; col < 5; col++) {
+      const off = (row % 2) * bw * 0.5;
+      const x   = col * bw + off;
+      const y   = row * bh;
+      const v   = (Math.random() - 0.5) * 22;
+      const r   = clamp(brightness + v);
+      const g   = clamp(brightness - 4 + v * 0.8);
+      const b   = clamp(brightness - 9 + v * 0.6);
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(x + 1, y + 1, bw - 2, bh - 2);
+    }
+  }
+  ctx.strokeStyle = `rgba(12,9,6,0.85)`;
+  ctx.lineWidth   = 2;
+  for (let row = 0; row <= 6; row++) {
+    const off = (row % 2) * bw * 0.5;
+    ctx.beginPath(); ctx.moveTo(0, row * bh); ctx.lineTo(sz, row * bh); ctx.stroke();
+    for (let col = 0; col <= 5; col++) {
+      ctx.beginPath();
+      ctx.moveTo(col * bw + off, row * bh);
+      ctx.lineTo(col * bw + off, (row + 1) * bh);
+      ctx.stroke();
+    }
+  }
+  for (let i = 0; i < 2500; i++) {
+    const a = Math.random() * 0.12;
+    ctx.fillStyle = `rgba(0,0,0,${a})`;
+    ctx.fillRect(Math.random() * sz, Math.random() * sz, 2, 2);
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+function makeWood(sz = 256) {
+  const cv  = document.createElement('canvas');
+  cv.width  = cv.height = sz;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#1e0f05';
+  ctx.fillRect(0, 0, sz, sz);
+  for (let x = 0; x < sz; x++) {
+    const g = Math.sin(x * 0.18) * 9 + Math.sin(x * 0.45) * 4;
+    const v = g + (Math.random() - 0.5) * 6;
+    ctx.strokeStyle = `rgba(90,45,12,${0.28 + Math.random() * 0.2})`;
+    ctx.lineWidth   = 1;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + v, sz); ctx.stroke();
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+function makeFlags(sz = 256, brightness = 52) {
+  const cv  = document.createElement('canvas');
+  cv.width  = cv.height = sz;
+  const ctx = cv.getContext('2d');
+  const ts  = sz / 5;
+  ctx.fillStyle = `rgb(${brightness},${brightness - 2},${brightness - 4})`;
+  ctx.fillRect(0, 0, sz, sz);
+  for (let r = 0; r < 6; r++) {
+    for (let c = 0; c < 6; c++) {
+      const v = (Math.random() - 0.5) * 16;
+      ctx.fillStyle = `rgb(${brightness + v},${brightness - 2 + v},${brightness - 4 + v})`;
+      ctx.fillRect(c * ts, r * ts, ts - 1, ts - 1);
+    }
+  }
+  for (let i = 0; i < 1800; i++) {
+    ctx.fillStyle = `rgba(0,0,0,${Math.random() * 0.14})`;
+    ctx.fillRect(Math.random() * sz, Math.random() * sz, 2, 2);
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+const stoneTex     = makeStone(256, 68);  stoneTex.repeat.set(2, 2);
+const dStoneTex    = makeStone(256, 40);  dStoneTex.repeat.set(2, 2);
+const woodTex      = makeWood(256);       woodTex.repeat.set(1, 1);
+const floorTex     = makeFlags(256, 56);  floorTex.repeat.set(3, 3);
+const dFloorTex    = makeFlags(256, 36);  dFloorTex.repeat.set(4, 4);
+
+// ─────────────────────────────────────────────────────────────────
+// Materials
+// ─────────────────────────────────────────────────────────────────
+const MAT = {
+  stone:    new THREE.MeshLambertMaterial({ map: stoneTex }),
+  dstone:   new THREE.MeshLambertMaterial({ map: dStoneTex }),
+  floor:    new THREE.MeshLambertMaterial({ map: floorTex }),
+  dfloor:   new THREE.MeshLambertMaterial({ map: dFloorTex }),
+  wood:     new THREE.MeshLambertMaterial({ map: woodTex }),
+  dwood:    new THREE.MeshLambertMaterial({ color: 0x180c02 }),
+  iron:     new THREE.MeshLambertMaterial({ color: 0x2e2e3a }),
+  rust:     new THREE.MeshLambertMaterial({ color: 0x4e1e0e }),
+  bone:     new THREE.MeshLambertMaterial({ color: 0xcfc4a0 }),
+  carpet:   new THREE.MeshLambertMaterial({ color: 0x3a0606 }),
+  gold:     new THREE.MeshLambertMaterial({ color: 0x9a7c28 }),
+  book1:    new THREE.MeshLambertMaterial({ color: 0x221440 }),
+  book2:    new THREE.MeshLambertMaterial({ color: 0x103010 }),
+  book3:    new THREE.MeshLambertMaterial({ color: 0x401010 }),
+  leather:  new THREE.MeshLambertMaterial({ color: 0x2c180a }),
+  glass:    new THREE.MeshLambertMaterial({ color: 0x335533, transparent: true, opacity: 0.55 }),
+  candle:   new THREE.MeshLambertMaterial({ color: 0xeeddcc }),
+  flame:    new THREE.MeshBasicMaterial ({ color: 0xff8800, transparent: true, opacity: 0.9 }),
+  fire:     new THREE.MeshBasicMaterial ({ color: 0xff6600, transparent: true, opacity: 0.9 }),
+  invis:    new THREE.MeshBasicMaterial ({ visible: false }),
+  tapestry: new THREE.MeshLambertMaterial({ color: 0x420010 }),
+};
+
+// ─────────────────────────────────────────────────────────────────
+// Collision + walkable surfaces
+// ─────────────────────────────────────────────────────────────────
+const colliders = [];   // AABB boxes [{minX,maxX,minY,maxY,minZ,maxZ}]
+const walkable  = [];   // THREE.Mesh[] for downward raycast
+
+function addCol(x0, x1, y0, y1, z0, z1) {
+  colliders.push({ minX: x0, maxX: x1, minY: y0, maxY: y1, minZ: z0, maxZ: z1 });
+}
+
+function hits(x, y, z) {
+  const r = P_RADIUS, h = PLAYER_H;
+  for (const b of colliders) {
+    if (x + r > b.minX && x - r < b.maxX &&
+        z + r > b.minZ && z - r < b.maxZ &&
+        y < b.maxY      && y + h  > b.minY) return true;
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Lights
+// ─────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x0e0e1c, 2.0));
+
+const moon = new THREE.DirectionalLight(0x2233bb, 0.5);
+moon.position.set(-35, 70, -50);
+moon.castShadow = true;
+moon.shadow.mapSize.set(2048, 2048);
+moon.shadow.camera.near = 1;
+moon.shadow.camera.far  = 250;
+moon.shadow.camera.left = moon.shadow.camera.bottom = -70;
+moon.shadow.camera.right = moon.shadow.camera.top   =  70;
+scene.add(moon);
+
+const torchFlicker = [];   // { light, flame, base }
+
+function addTorch(x, y, z, inten = 1.2, range = 8) {
+  const g = new THREE.Group();
+  g.add(mesh(new THREE.BoxGeometry(0.07, 0.05, 0.18), MAT.iron));
+  const hnd = mesh(new THREE.CylinderGeometry(0.035, 0.028, 0.38, 6), MAT.dwood);
+  hnd.position.y = 0.14; hnd.rotation.x = 0.18; g.add(hnd);
+  const fl = mesh(new THREE.SphereGeometry(0.075, 6, 6), MAT.fire);
+  fl.position.y = 0.36; g.add(fl);
+  const lt = new THREE.PointLight(0xff7700, inten, range, 1.8);
+  lt.position.y = 0.38; g.add(lt);
+  g.position.set(x, y, z);
+  scene.add(g);
+  torchFlicker.push({ light: lt, flame: fl, base: inten });
+  return g;
+}
+
+function addCandle(x, y, z, inten = 0.45) {
+  const g = new THREE.Group();
+  g.add(mesh(new THREE.CylinderGeometry(0.038, 0.038, 0.22, 8), MAT.candle));
+  const fl = mesh(new THREE.SphereGeometry(0.038, 6, 6), MAT.flame);
+  fl.position.y = 0.14; g.add(fl);
+  const lt = new THREE.PointLight(0xffaa33, inten, 2.5, 2);
+  lt.position.y = 0.16; g.add(lt);
+  g.position.set(x, y, z);
+  scene.add(g);
+  torchFlicker.push({ light: lt, flame: fl, base: inten });
+  return g;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Geometry helpers
+// ─────────────────────────────────────────────────────────────────
+function mesh(geo, mat) {
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = m.receiveShadow = true;
+  return m;
+}
+
+// Place a box in the scene
+function box(w, h, d, mat, x, y, z, ry = 0) {
+  const m = mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z);
+  if (ry) m.rotation.y = ry;
+  scene.add(m);
+  return m;
+}
+
+// Wall box + AABB collider
+function wall(w, h, d, mat, x, y, z, ry = 0) {
+  const m = box(w, h, d, mat, x, y, z, ry);
+  // axis-aligned only (ry == 0 or PI/2)
+  const hw = w / 2, hd = d / 2;
+  if (!ry || Math.abs(ry) < 0.01) {
+    addCol(x - hw, x + hw, y, y + h, z - hd, z + hd);
+  } else {
+    // rotated 90° — swap w and d for collider
+    addCol(x - hd, x + hd, y, y + h, z - hw, z + hw);
+  }
+  return m;
+}
+
+// Floor slab + add to walkable
+function floorSlab(w, d, mat, x, y, z) {
+  const m = box(w, FT, d, mat, x, y + FT / 2, z);
+  walkable.push(m);
+  return m;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Doors
+// ─────────────────────────────────────────────────────────────────
+const doors = [];       // door data
+const interactList = []; // { pos:Vector3, range, onUse }
+
+function addDoor(x, y, z, ry = 0) {
+  const pivot = new THREE.Group();
+  pivot.position.set(x, y, z);
+  pivot.rotation.y = ry;
+  scene.add(pivot);
+
+  const panel = mesh(new THREE.BoxGeometry(0.96, 2.18, 0.07), MAT.dwood);
+  panel.position.set(0.48, 1.09, 0);
+  pivot.add(panel);
+
+  // Frame
+  box(0.1, 2.3, 0.1, MAT.dstone, x - 0.06 * Math.cos(ry), y + 1.15, z - 0.06 * Math.sin(ry));
+  box(0.1, 2.3, 0.1, MAT.dstone, x + Math.cos(ry) * 0.96 + 0.06 * Math.cos(ry), y + 1.15, z + Math.sin(ry) * 0.96 + 0.06 * Math.sin(ry));
+  box(1.1, 0.1, 0.1, MAT.dstone, x + Math.cos(ry) * 0.48, y + 2.28, z + Math.sin(ry) * 0.48, ry);
+
+  const d = { pivot, open: false, targetRot: ry, closedRot: ry, openRot: ry - Math.PI * 0.82 };
+  doors.push(d);
+
+  const worldPos = new THREE.Vector3(x + Math.cos(ry) * 0.48, y + 1.1, z + Math.sin(ry) * 0.48);
+  interactList.push({
+    pos: worldPos, range: 2.6,
+    onUse() {
+      d.open = !d.open;
+      d.targetRot = d.open ? d.openRot : d.closedRot;
+    }
+  });
+  return d;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Decoration helpers
+// ─────────────────────────────────────────────────────────────────
+const BMATS = [MAT.book1, MAT.book2, MAT.book3, MAT.tapestry, MAT.leather];
+
+function bookshelf(x, y, z, ry = 0, w = 2, h = 2.2) {
+  const g = new THREE.Group();
+  g.add(mesh(new THREE.BoxGeometry(w, h, 0.32), MAT.dwood));
+  const shelves = 4;
+  for (let s = 0; s < shelves; s++) {
+    const sy   = -h / 2 + 0.25 + s * (h / shelves);
+    const bpw  = Math.floor(w / 0.13);
+    for (let b = 0; b < bpw; b++) {
+      const bh  = 0.2 + Math.random() * 0.06;
+      const bk  = mesh(new THREE.BoxGeometry(0.11, bh, 0.2), BMATS[b % BMATS.length]);
+      bk.position.set(-w / 2 + 0.07 + b * 0.13, sy + bh / 2, 0);
+      bk.rotation.y = (Math.random() - 0.5) * 0.08;
+      g.add(bk);
+    }
+    const plank = mesh(new THREE.BoxGeometry(w, 0.03, 0.28), MAT.wood);
+    plank.position.set(0, sy - 0.015, 0);
+    g.add(plank);
+  }
+  g.position.set(x, y + h / 2, z);
+  g.rotation.y = ry;
+  scene.add(g);
+  const hw = w / 2, hd = 0.17;
+  const cx = Math.cos(ry), cz = Math.sin(ry);
+  addCol(x - hw * Math.abs(cx) - hd * Math.abs(cz),
+         x + hw * Math.abs(cx) + hd * Math.abs(cz),
+         y, y + h,
+         z - hw * Math.abs(cz) - hd * Math.abs(cx),
+         z + hw * Math.abs(cz) + hd * Math.abs(cx));
+}
+
+function tableFn(x, y, z, w = 1.6, d = 0.8, h = 0.74, ry = 0) {
+  const g = new THREE.Group();
+  g.add(Object.assign(mesh(new THREE.BoxGeometry(w, 0.07, d), MAT.wood), { position: new THREE.Vector3(0, h, 0) }));
+  for (const [lx, lz] of [[-w / 2 + 0.07, -d / 2 + 0.07], [w / 2 - 0.07, -d / 2 + 0.07], [-w / 2 + 0.07, d / 2 - 0.07], [w / 2 - 0.07, d / 2 - 0.07]]) {
+    const leg = mesh(new THREE.BoxGeometry(0.07, h - 0.035, 0.07), MAT.dwood);
+    leg.position.set(lx, (h - 0.035) / 2, lz);
+    g.add(leg);
+  }
+  g.position.set(x, y, z);
+  g.rotation.y = ry;
+  scene.add(g);
+  addCol(x - w / 2, x + w / 2, y, y + h + 0.07, z - d / 2, z + d / 2);
+}
+
+function chairFn(x, y, z, ry = 0) {
+  const g = new THREE.Group();
+  const sh = 0.44;
+  g.add(Object.assign(mesh(new THREE.BoxGeometry(0.48, 0.055, 0.44), MAT.dwood), { position: new THREE.Vector3(0, sh, 0) }));
+  const back = mesh(new THREE.BoxGeometry(0.48, 0.48, 0.05), MAT.dwood);
+  back.position.set(0, sh + 0.27, -0.195); g.add(back);
+  for (const [lx, lz] of [[-0.19, -0.17], [0.19, -0.17], [-0.19, 0.17], [0.19, 0.17]]) {
+    const leg = mesh(new THREE.BoxGeometry(0.05, sh, 0.05), MAT.dwood);
+    leg.position.set(lx, sh / 2, lz); g.add(leg);
+  }
+  g.position.set(x, y, z); g.rotation.y = ry; scene.add(g);
+}
+
+function barrel(x, y, z) {
+  const g = new THREE.Group();
+  g.add(mesh(new THREE.CylinderGeometry(0.23, 0.2, 0.58, 10), MAT.wood));
+  for (const by of [0.14, -0.14]) {
+    const ring = mesh(new THREE.TorusGeometry(0.24, 0.022, 6, 12), MAT.iron);
+    ring.rotation.x = Math.PI / 2; ring.position.y = by; g.add(ring);
+  }
+  g.position.set(x, y + 0.29, z); scene.add(g);
+  addCol(x - 0.28, x + 0.28, y, y + 0.6, z - 0.28, z + 0.28);
+}
+
+function skull(x, y, z, ry = 0) {
+  const g = new THREE.Group();
+  const cr = mesh(new THREE.SphereGeometry(0.13, 8, 6), MAT.bone);
+  cr.scale.y = 0.82; g.add(cr);
+  const jaw = mesh(new THREE.BoxGeometry(0.18, 0.055, 0.14), MAT.bone);
+  jaw.position.set(0, -0.09, 0.04); g.add(jaw);
+  g.position.set(x, y, z); g.rotation.y = ry; scene.add(g);
+}
+
+function pillar(x, y, z, h = FH - 0.3) {
+  const m = mesh(new THREE.CylinderGeometry(0.24, 0.29, h, 10), MAT.stone);
+  m.position.set(x, y + h / 2, z); scene.add(m);
+  box(0.65, 0.14, 0.65, MAT.stone, x, y + h + 0.07, z);
+  box(0.65, 0.14, 0.65, MAT.stone, x, y + 0.07, z);
+  addCol(x - 0.29, x + 0.29, y, y + h, z - 0.29, z + 0.29);
+}
+
+function throne(x, y, z) {
+  const g = new THREE.Group();
+  g.add(Object.assign(mesh(new THREE.BoxGeometry(1.15, 0.1, 1.0), MAT.dwood), { position: new THREE.Vector3(0, 0.54, 0) }));
+  const back = mesh(new THREE.BoxGeometry(1.15, 1.55, 0.11), MAT.dwood);
+  back.position.set(0, 1.35, -0.45); g.add(back);
+  for (const ax of [-0.52, 0.52]) {
+    const arm = mesh(new THREE.BoxGeometry(0.11, 0.1, 0.9), MAT.dwood);
+    arm.position.set(ax, 0.77, 0); g.add(arm);
+  }
+  for (const [lx, lz] of [[-0.48, -0.38], [0.48, -0.38], [-0.48, 0.38], [0.48, 0.38]]) {
+    const leg = mesh(new THREE.BoxGeometry(0.11, 0.54, 0.11), MAT.dwood);
+    leg.position.set(lx, 0.27, lz); g.add(leg);
+  }
+  const trim = mesh(new THREE.BoxGeometry(1.18, 0.07, 0.07), MAT.gold);
+  trim.position.set(0, 2.12, -0.45); g.add(trim);
+  for (let i = -2; i <= 2; i++) {
+    const sp = mesh(new THREE.CylinderGeometry(0.028, 0.055, 0.19, 4), MAT.gold);
+    sp.position.set(i * 0.24, 2.27, -0.45); g.add(sp);
+  }
+  g.position.set(x, y, z); scene.add(g);
+  addCol(x - 0.62, x + 0.62, y, y + 2.35, z - 0.52, z + 0.52);
+}
+
+function bed(x, y, z, ry = 0) {
+  const g = new THREE.Group();
+  g.add(Object.assign(mesh(new THREE.BoxGeometry(1.08, 0.28, 2.05), MAT.dwood), { position: new THREE.Vector3(0, 0.14, 0) }));
+  const matt = mesh(new THREE.BoxGeometry(0.98, 0.17, 1.88), new THREE.MeshLambertMaterial({ color: 0x280a20 }));
+  matt.position.y = 0.385; g.add(matt);
+  const head = mesh(new THREE.BoxGeometry(1.08, 0.55, 0.09), MAT.dwood);
+  head.position.set(0, 0.56, -0.93); g.add(head);
+  const pillow = mesh(new THREE.BoxGeometry(0.38, 0.09, 0.28), new THREE.MeshLambertMaterial({ color: 0x180912 }));
+  pillow.position.set(0, 0.535, -0.68); g.add(pillow);
+  g.position.set(x, y, z); g.rotation.y = ry; scene.add(g);
+  addCol(x - 0.56, x + 0.56, y, y + 0.6, z - 1.1, z + 1.1);
+}
+
+function hangingCage(x, y, z) {
+  const chain = mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.55, 4), MAT.iron);
+  chain.position.set(x, y + 0.3, z); scene.add(chain);
+  const g = new THREE.Group();
+  for (let i = 0; i < 6; i++) {
+    const a   = (i / 6) * Math.PI * 2;
+    const bar = mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.48, 4), MAT.iron);
+    bar.position.set(Math.cos(a) * 0.2, 0, Math.sin(a) * 0.2); g.add(bar);
+  }
+  for (const by of [0.23, -0.23]) {
+    const ring = mesh(new THREE.TorusGeometry(0.21, 0.022, 4, 12), MAT.iron);
+    ring.rotation.x = Math.PI / 2; ring.position.y = by; g.add(ring);
+  }
+  g.position.set(x, y, z); scene.add(g);
+}
+
+function candelabra(x, y, z, h = 1.2) {
+  const g = new THREE.Group();
+  g.add(mesh(new THREE.CylinderGeometry(0.035, 0.09, h, 8), MAT.iron));
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2;
+    const arm = mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.38, 4), MAT.iron);
+    arm.rotation.z = Math.PI / 2; arm.rotation.y = a;
+    arm.position.set(Math.cos(a) * 0.19, h / 2 - 0.04, Math.sin(a) * 0.19); g.add(arm);
+    addCandle(x + Math.cos(a) * 0.37, y + h / 2 + 0.11, z + Math.sin(a) * 0.37, 0.38);
+  }
+  g.position.set(x, y, z); scene.add(g);
+}
+
+function armorStand(x, y, z, ry = 0) {
+  const g = new THREE.Group();
+  g.add(Object.assign(mesh(new THREE.BoxGeometry(0.38, 0.42, 0.18), MAT.iron), { position: new THREE.Vector3(0, 0.92, 0) }));
+  g.add(Object.assign(mesh(new THREE.BoxGeometry(0.28, 0.32, 0.28), MAT.iron), { position: new THREE.Vector3(0, 1.41, 0) }));
+  for (const ax of [-0.26, 0.26]) {
+    g.add(Object.assign(mesh(new THREE.BoxGeometry(0.11, 0.42, 0.11), MAT.iron), { position: new THREE.Vector3(ax, 0.92, 0) }));
+  }
+  g.add(Object.assign(mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.68, 6), MAT.iron), { position: new THREE.Vector3(0, 0.34, 0) }));
+  g.add(Object.assign(mesh(new THREE.BoxGeometry(0.58, 0.035, 0.58), MAT.iron), { position: new THREE.Vector3(0, 0.018, 0) }));
+  g.position.set(x, y, z); g.rotation.y = ry; scene.add(g);
+  addCol(x - 0.3, x + 0.3, y, y + 1.62, z - 0.3, z + 0.3);
+}
+
+function cobweb(x, y, z, size = 0.85, ry = 0) {
+  const cv  = document.createElement('canvas');
+  cv.width  = cv.height = 128;
+  const ctx = cv.getContext('2d');
+  ctx.strokeStyle = 'rgba(210,210,210,0.45)';
+  ctx.lineWidth   = 1;
+  const cx = 64, cy = 64;
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * 58, cy + Math.sin(a) * 58); ctx.stroke();
+  }
+  for (let r = 14; r <= 54; r += 13) {
+    ctx.beginPath();
+    for (let i = 0; i <= 8; i++) {
+      const a  = (i / 8) * Math.PI * 2;
+      const px = cx + Math.cos(a) * r, py = cy + Math.sin(a) * r;
+      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    }
+    ctx.closePath(); ctx.stroke();
+  }
+  const mat = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), transparent: true, side: THREE.DoubleSide });
+  const m   = new THREE.Mesh(new THREE.PlaneGeometry(size, size), mat);
+  m.position.set(x, y, z); m.rotation.y = ry; scene.add(m);
+}
+
+function pentagram(x, y, z, r = 2.3) {
+  const cv  = document.createElement('canvas');
+  cv.width  = cv.height = 512;
+  const ctx = cv.getContext('2d');
+  ctx.strokeStyle = '#990000'; ctx.lineWidth = 7;
+  ctx.shadowBlur = 18; ctx.shadowColor = '#ff0000';
+  ctx.beginPath(); ctx.arc(256, 256, 228, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  for (let i = 0; i < 5; i++) {
+    const a  = (i * 4 * Math.PI / 5) - Math.PI / 2;
+    const px = 256 + Math.cos(a) * 228;
+    const py = 256 + Math.sin(a) * 228;
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  }
+  ctx.closePath(); ctx.stroke();
+  const mat = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), transparent: true, opacity: 0.82 });
+  const m   = new THREE.Mesh(new THREE.CircleGeometry(r, 32), mat);
+  m.rotation.x = -Math.PI / 2; m.position.set(x, y + 0.01, z); scene.add(m);
+}
+
+function portrait(x, y, z, ry = 0) {
+  const dark = new THREE.MeshLambertMaterial({ color: 0x0a0606 });
+  box(0.78, 1.08, 0.04, dark, x, y, z, ry);
+  box(0.9, 1.2, 0.03, MAT.dwood, x, y, z + (ry === 0 ? 0.025 : 0), ry);
+}
+
+function deadTree(x, z, h = 4, spread = 2) {
+  const trMat = new THREE.MeshLambertMaterial({ color: 0x181008 });
+  const brMat = new THREE.MeshLambertMaterial({ color: 0x0f0904 });
+  const tr    = mesh(new THREE.CylinderGeometry(0.13, 0.22, h, 5), trMat);
+  tr.position.set(x, h / 2, z); tr.castShadow = true; scene.add(tr);
+  for (let i = 0; i < 6; i++) {
+    const a   = (i / 6) * Math.PI * 2 + Math.random() * 0.5;
+    const len = spread * (0.45 + Math.random() * 0.55);
+    const bh  = h * (0.55 + Math.random() * 0.35);
+    const br  = mesh(new THREE.CylinderGeometry(0.03, 0.07, len, 4), brMat);
+    br.position.set(x + Math.cos(a) * len * 0.48, bh, z + Math.sin(a) * len * 0.48);
+    br.rotation.z = Math.cos(a) * 0.9;
+    br.rotation.x = Math.sin(a) * 0.4;
+    br.castShadow = true; scene.add(br);
+  }
+}
+
+function gravestone(x, z, ry = 0) {
+  const mat = new THREE.MeshLambertMaterial({ color: 0x393633 });
+  box(0.58, 0.88, 0.13, mat, x, 0.44, z, ry);
+  const top = mesh(new THREE.CylinderGeometry(0.29, 0.29, 0.13, 8, 1, false, 0, Math.PI), mat);
+  top.rotation.z = -Math.PI / 2; top.position.set(x, 0.965, z); scene.add(top);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Staircase builder
+// ─────────────────────────────────────────────────────────────────
+// Stairs: NE corner  x∈[4, TW-1]  z∈[-TW+1, -3]
+const STAIR_X0 = 4, STAIR_X1 = TW - 1;   // x range 4..8
+const STAIR_Z0 = -(TW - 1), STAIR_Z1 = -3; // z range -8..-3
+
+function buildStairs(fromY, toY) {
+  const sW    = STAIR_X1 - STAIR_X0;  // width  = 4
+  const sD    = STAIR_Z1 - STAIR_Z0;  // depth  = 5
+  const sH    = toY - fromY;
+  const steps = 14;
+  const stepD = sD / steps;
+  const stepH = sH / steps;
+
+  for (let i = 0; i < steps; i++) {
+    const sz = STAIR_Z0 + i * stepD;
+    const sy = fromY + i * stepH;
+    const s  = mesh(new THREE.BoxGeometry(sW, stepH + 0.06, stepD), MAT.stone);
+    s.position.set(STAIR_X0 + sW / 2, sy + (stepH + 0.06) / 2, sz + stepD / 2);
+    scene.add(s);
+  }
+
+  // Invisible ramp for smooth walking
+  const rampLen  = Math.sqrt(sD * sD + sH * sH);
+  const rampAngle = Math.atan2(sH, sD);
+  const ramp = new THREE.Mesh(new THREE.BoxGeometry(sW, 0.04, rampLen), MAT.invis);
+  ramp.rotation.x = -rampAngle;
+  ramp.position.set(STAIR_X0 + sW / 2, fromY + sH / 2, STAIR_Z0 + sD / 2);
+  scene.add(ramp);
+  walkable.push(ramp);
+
+  // Railing
+  box(0.06, sH + 0.7, sD, MAT.dwood, STAIR_X0 + 0.04, fromY + sH / 2 + 0.35, STAIR_Z0 + sD / 2);
+
+  // Enclosing south wall of stairwell
+  wall(WT, FH, sD, MAT.stone, STAIR_X0 - WT / 2, fromY + FH / 2, STAIR_Z0 + sD / 2);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Floor/wall builder
+// ─────────────────────────────────────────────────────────────────
+function buildFloor(fy) {
+  // Main floor (skip stair NE corner)
+  floorSlab(TW * 2, TW * 2, MAT.floor, 0, fy, 0);
+}
+
+function buildWalls(fy, floorNum) {
+  const wh = FH - FT;
+  const wy = fy + FH / 2;
+
+  // ── North wall (no door) ──
+  wall(TW * 2, wh, WT, MAT.stone, 0, wy, -(TW - WT / 2));
+
+  // ── South wall ──
+  if (floorNum === 0) {
+    // split for main door (1.05 wide gap centered at x=0.48)
+    wall(TW - 1.05, wh, WT, MAT.stone, -(TW / 2 + 0.025), wy, TW - WT / 2);
+    wall(TW - 1.05, wh, WT, MAT.stone, TW / 2 + 0.78, wy, TW - WT / 2);
+    // transom over door
+    box(1.04, wh - 2.2, WT, MAT.stone, 0.48, fy + 2.2 + (wh - 2.2) / 2, TW - WT / 2);
+    addDoor(-0.04, fy, TW - WT / 2 - 0.04, 0);
+  } else {
+    wall(TW * 2, wh, WT, MAT.stone, 0, wy, TW - WT / 2);
+  }
+
+  // ── East wall ── full continuous (stairwell is interior, no wall opening needed)
+  wall(WT, wh, TW * 2, MAT.stone, TW - WT / 2, wy, 0);
+
+  // ── West wall ──
+  wall(WT, wh, TW * 2, MAT.stone, -(TW - WT / 2), wy, 0);
+
+  // ── Ceiling ──
+  box(TW * 2, FT, TW * 2, MAT.dstone, 0, fy + FH + FT / 2, 0);
+
+  // Window embrasures (visual only) — N wall
+  for (const wx of [-5, 0, 5]) {
+    box(0.65, 1.1, WT * 0.4, MAT.dstone, wx, fy + 2.5, -(TW - WT * 0.9));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Sky & environment
+// ─────────────────────────────────────────────────────────────────
+{
+  // Sky dome
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(160, 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0x020208, side: THREE.BackSide }));
+  scene.add(sky);
+
+  // Stars
+  const pos = new Float32Array(1500);
+  for (let i = 0; i < 500; i++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const r     = 155;
+    pos[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
+    pos[i * 3 + 1] = r * Math.cos(phi);
+    pos[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+  }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.6 })));
+
+  // Moon
+  const moonMesh = new THREE.Mesh(new THREE.SphereGeometry(4, 14, 14),
+    new THREE.MeshBasicMaterial({ color: 0xccccaa }));
+  moonMesh.position.set(-55, 85, -100);
+  scene.add(moonMesh);
+  const glow = new THREE.Mesh(new THREE.SphereGeometry(6.5, 14, 14),
+    new THREE.MeshBasicMaterial({ color: 0x888866, transparent: true, opacity: 0.12 }));
+  glow.position.copy(moonMesh.position); scene.add(glow);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Ground & courtyard
+// ─────────────────────────────────────────────────────────────────
+{
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(120, 120, 40, 40), MAT.dfloor);
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+  walkable.push(ground);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Outer courtyard wall
+// ─────────────────────────────────────────────────────────────────
+{
+  const OW = 30, OWH = 3.8, OWT = 1.1;
+
+  // North wall
+  wall(OW * 2, OWH, OWT, MAT.dstone, 0, OWH / 2, -OW);
+  // South wall — split for gate (~5-unit wide opening centred at x=0)
+  // west part: from x=-OW to x=-2.5
+  wall(OW - 2.5, OWH, OWT, MAT.dstone, -(OW / 2 + 1.25), OWH / 2, OW);
+  // east part: from x=2.5 to x=OW
+  wall(OW - 2.5, OWH, OWT, MAT.dstone, (OW / 2 + 1.25), OWH / 2, OW);
+
+  // East & West walls
+  wall(OWT, OWH, OW * 2, MAT.dstone, OW, OWH / 2, 0);
+  wall(OWT, OWH, OW * 2, MAT.dstone, -OW, OWH / 2, 0);
+
+  // Battlements on all walls
+  for (let i = -OW + 1.5; i < OW; i += 3) {
+    box(1.1, 0.75, 1.0, MAT.dstone, i, OWH + 0.37, -OW);
+    box(1.1, 0.75, 1.0, MAT.dstone, -OW, OWH + 0.37, i);
+    box(1.1, 0.75, 1.0, MAT.dstone, OW, OWH + 0.37, i);
+    if (Math.abs(i) > 3) box(1.1, 0.75, 1.0, MAT.dstone, i, OWH + 0.37, OW);
+  }
+
+  // Corner turrets
+  for (const [cx, cz] of [[-OW, -OW], [OW, -OW], [-OW, OW], [OW, OW]]) {
+    box(3.5, OWH + 2.5, 3.5, MAT.dstone, cx, (OWH + 2.5) / 2, cz);
+    box(4.0, 0.7, 4.0, MAT.dstone, cx, OWH + 2.85, cz);
+  }
+
+  // Gate posts + lintel
+  box(1.6, OWH, 1.4, MAT.dstone, -2.6, OWH / 2, OW);
+  box(1.6, OWH, 1.4, MAT.dstone, 2.6, OWH / 2, OW);
+  box(6.5, 0.7, 1.4, MAT.dstone, 0, OWH + 0.35, OW);
+
+  // Gate doors
+  addDoor(-2.08, 0, OW - 0.58, 0);
+  addDoor(2.08, 0, OW - 0.58, Math.PI);
+
+  // Wall torches
+  for (let t = -22; t <= 22; t += 12) {
+    addTorch(t, OWH - 0.6, -OW + 0.7);
+    addTorch(-OW + 0.7, OWH - 0.6, t);
+    addTorch(OW - 0.7, OWH - 0.6, t);
+  }
+  addTorch(-2.6, OWH - 0.5, OW - 0.8, 1.5, 12);
+  addTorch(2.6, OWH - 0.5, OW - 0.8, 1.5, 12);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Atmospheric props (exterior)
+// ─────────────────────────────────────────────────────────────────
+for (const [x, z] of [[-14,-20],[-20,-10],[-25,5],[-18,15],[-9,-26],[7,-22],[17,-16],[24,-5],[22,10],[15,22],[-5,27],[10,24],[-22,22],[26,18]]) {
+  deadTree(x, z, 3 + Math.random() * 3.5, 1.4 + Math.random() * 1.8);
+}
+for (const [x, z] of [[-13,-16],[-8,-20],[-17,-8],[-16,12],[-11,19],[11,-17],[15,-11],[19,-20],[13,16],[17,9],[22,22],[-21,20]]) {
+  gravestone(x, z, (Math.random() - 0.5) * 0.25);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// TOWER CONSTRUCTION
+// ─────────────────────────────────────────────────────────────────
+
+// External tower walls
+for (let fl = 0; fl < 4; fl++) {
+  const fy = fl * FH;
+  // North exterior
+  box(TW * 2 + WT * 2, FH, WT, MAT.stone, 0, fy + FH / 2, -(TW + WT / 2));
+  // South exterior (ground floor has arch)
+  if (fl === 0) {
+    box((TW * 2 + WT * 2) / 2 - 0.55, FH, WT, MAT.stone, -(TW / 2 + 0.28 + 0.55 / 2), fy + FH / 2, TW + WT / 2);
+    box((TW * 2 + WT * 2) / 2 - 0.55, FH, WT, MAT.stone, (TW / 2 + 0.28 + 0.55 / 2), fy + FH / 2, TW + WT / 2);
+    box(1.04, FH - 2.2, WT, MAT.stone, 0.48, fy + 2.2 + (FH - 2.2) / 2, TW + WT / 2);
+  } else {
+    box(TW * 2 + WT * 2, FH, WT, MAT.stone, 0, fy + FH / 2, TW + WT / 2);
+  }
+  // East/West exterior
+  box(WT, FH, TW * 2 + WT * 2, MAT.stone, TW + WT / 2, fy + FH / 2, 0);
+  box(WT, FH, TW * 2 + WT * 2, MAT.stone, -(TW + WT / 2), fy + FH / 2, 0);
+}
+
+// Tower base foundation
+box(TW * 2 + WT * 2 + 1, 0.6, TW * 2 + WT * 2 + 1, MAT.dstone, 0, 0.3, 0);
+
+// ── FLOOR 0: ENTRANCE HALL ───────────────────────────────────────
+{
+  const fy = 0;
+  buildFloor(fy);
+  buildWalls(fy, 0);
+
+  // Entrance torches
+  addTorch(-2.2, 2.4, TW - 1.2, 1.5, 10);
+  addTorch(2.2, 2.4, TW - 1.2, 1.5, 10);
+  addTorch(-(TW - 1.2), 2.4, 0);
+  addTorch(TW - 1.2, 2.4, 0);
+  addTorch(0, 2.4, -(TW - 1.2));
+
+  // Barrels
+  barrel(-(TW - 2), fy, -(TW - 2));
+  barrel(-(TW - 2) + 0.7, fy, -(TW - 2));
+  barrel(-(TW - 2), fy, -(TW - 2) + 0.7);
+
+  // Broken table & chairs
+  tableFn(-3.5, fy, 2.5, 1.35, 0.68, 0.7, 0.12);
+  chairFn(-2.6, fy, 3.2, 0.3);
+  chairFn(-4.5, fy, 1.8, Math.PI + 0.2);
+
+  // Iron chains with skulls
+  for (const [cx, cz] of [[-2.5, -4.5], [3, -5.5]]) {
+    const ch = mesh(new THREE.CylinderGeometry(0.016, 0.016, 1.4, 4), MAT.iron);
+    ch.position.set(cx, FH - 0.7, cz); scene.add(ch);
+    skull(cx, FH - 1.48, cz, Math.random() * 0.8);
+  }
+
+  // Cobwebs
+  cobweb(-(TW - 0.05), 3.8, -(TW - 0.9), 1.1, Math.PI / 2);
+  cobweb(TW - 0.05, 3.8, -(TW - 0.9), 1.1, -Math.PI / 2);
+  cobweb(-(TW - 0.9), 3.8, -(TW - 0.05), 1.1, 0);
+
+  // Wall sconce ring
+  const ring = mesh(new THREE.TorusGeometry(0.11, 0.025, 6, 12), MAT.iron);
+  ring.position.set(TW - 1.1, 1.75, -3.5); ring.rotation.y = Math.PI / 2; scene.add(ring);
+
+  // Staircase + door to stairwell
+  buildStairs(0, FH);
+  addDoor(STAIR_X0 - 0.04, fy, STAIR_Z1 - 0.04, 0);
+}
+
+// ── FLOOR 1: LIBRARY ─────────────────────────────────────────────
+{
+  const fy = FH;
+  buildFloor(fy);
+  buildWalls(fy, 1);
+
+  // Bookshelves N wall
+  for (const bx of [-7, -4.5, -2, 0.5, 3, 5.5]) {
+    bookshelf(bx, fy, -(TW - 1.2), 0, 2.1, 2.3);
+  }
+  // Bookshelves W wall
+  for (const bz of [-5, -2, 1, 4]) {
+    bookshelf(-(TW - 1.2), fy, bz, Math.PI / 2, 2, 2.3);
+  }
+
+  // Central reading table
+  tableFn(0, fy, 2.5, 2.5, 1.0, 0.78);
+  for (const [cx, cz, ry] of [[-1.2, 2.0, 0], [1.2, 2.0, 0.05], [-1.2, 3.0, Math.PI], [1.2, 3.0, Math.PI]]) {
+    chairFn(cx, fy, cz, ry);
+  }
+  candelabra(0, fy + 0.82, 2.5);
+
+  // Portraits on S wall
+  for (const px of [-5.5, 0, 5.5]) portrait(px, fy + 2.2, TW - 1.07);
+
+  // Skull display
+  skull(-7, fy + 2.52, -(TW - 1.35), 0.4);
+  skull(5.5, fy + 2.52, -(TW - 1.35), -0.3);
+
+  // Rolled scroll
+  const scroll = mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.36, 8), new THREE.MeshLambertMaterial({ color: 0xc8a060 }));
+  scroll.rotation.z = Math.PI / 2; scroll.position.set(-0.4, fy + 0.84, 3.0); scene.add(scroll);
+
+  // Torches
+  addTorch(-(TW - 1.2), fy + 2.5, -5);
+  addTorch(-(TW - 1.2), fy + 2.5, 5);
+  addTorch(TW - 1.2, fy + 2.5, 0);
+  addTorch(0, fy + 2.5, -(TW - 1.2));
+
+  // Cobwebs
+  cobweb(TW - 0.05, fy + 4.0, -(TW - 0.9), 1.2, -Math.PI / 2);
+
+  buildStairs(fy, fy + FH);
+  addDoor(STAIR_X0 - 0.04, fy, STAIR_Z1 - 0.04, 0);
+}
+
+// ── FLOOR 2: LABORATORY ──────────────────────────────────────────
+{
+  const fy = FH * 2;
+  buildFloor(fy);
+  buildWalls(fy, 2);
+
+  // Pentagram
+  pentagram(0, fy, 1);
+
+  // Alchemy tables
+  for (const [ax, ary] of [[-5, 0], [5, 0], [0, Math.PI / 2]]) {
+    tableFn(ax, fy, -(TW - 2.2), 2.0, 0.85, 0.75, ary);
+    // Vials on table
+    const glassClrs = [0x44cc44, 0xcc4444, 0x4444cc, 0xcccc44, 0xcc44cc];
+    for (let i = 0; i < 5; i++) {
+      const vial = mesh(
+        new THREE.CylinderGeometry(0.038 + Math.random() * 0.025, 0.055 + Math.random() * 0.02, 0.1 + Math.random() * 0.14, 8),
+        new THREE.MeshLambertMaterial({ color: glassClrs[i], transparent: true, opacity: 0.55 + Math.random() * 0.3 }));
+      vial.position.set(ax + (i - 2) * 0.18, fy + 0.82, -(TW - 2.2));
+      scene.add(vial);
+      const gl = new THREE.PointLight(glassClrs[i], 0.28, 1.8); gl.position.copy(vial.position); gl.position.y += 0.12; scene.add(gl);
+    }
+  }
+
+  // Central experiment altar
+  tableFn(0, fy, 1.5, 2.2, 1.0, 0.82);
+  skull(0, fy + 0.88, 1.5, 0.3);
+  skull(-0.5, fy + 0.88, 1.9, -0.5);
+
+  // Bookshelves E wall
+  for (const bz of [-5, -2, 1, 4]) bookshelf(TW - 1.2, fy, bz, -Math.PI / 2, 2, 2.3);
+
+  // Hanging cages
+  hangingCage(-3.5, fy + FH - 0.55, -2);
+  hangingCage(3.5, fy + FH - 0.55, -2);
+  hangingCage(0, fy + FH - 0.55, 4.5);
+
+  // Skull altar (W wall)
+  box(1.1, 0.55, 0.55, MAT.dstone, -(TW - 2.4), fy + 0.28, 3.5);
+  skull(-(TW - 2.4), fy + 0.62, 3.5, 0);
+  skull(-(TW - 2.8), fy + 0.62, 3.7, 0.4);
+  skull(-(TW - 2.0), fy + 0.62, 3.7, -0.4);
+  addCandle(-(TW - 2.8), fy + 0.6, 3.2, 0.6);
+  addCandle(-(TW - 2.0), fy + 0.6, 3.2, 0.6);
+
+  // Torches
+  addTorch(-(TW - 1.2), fy + 2.5, -5.5);
+  addTorch(-(TW - 1.2), fy + 2.5, 5.5);
+  addTorch(TW - 1.2, fy + 2.5, -5.5);
+  addTorch(TW - 1.2, fy + 2.5, 5.5);
+  addTorch(0, fy + 2.5, -(TW - 1.2));
+
+  // Cobwebs
+  cobweb(-(TW - 0.05), fy + 4.1, 1, 1.4, Math.PI / 2);
+  cobweb(0, fy + 4.1, -(TW - 0.05), 1.4, 0);
+
+  buildStairs(fy, fy + FH);
+  addDoor(STAIR_X0 - 0.04, fy, STAIR_Z1 - 0.04, 0);
+}
+
+// ── FLOOR 3: THRONE ROOM ─────────────────────────────────────────
+{
+  const fy = FH * 3;
+  buildFloor(fy);
+  buildWalls(fy, 3);
+
+  // Throne
+  throne(0, fy, -(TW - 3));
+
+  // Red carpet
+  box(2.6, 0.025, TW * 2 - 3.5, MAT.carpet, 0, fy + 0.013, (TW * 2 - 3.5) / 2 - (TW - WT));
+
+  // Pillars
+  for (const [px, pz] of [[-4.5, -5], [4.5, -5], [-4.5, 1.5], [4.5, 1.5]]) {
+    pillar(px, fy, pz, FH - 0.4);
+  }
+
+  // Tapestries on N wall
+  for (const tx of [-5.5, 0, 5.5]) {
+    box(1.6, 2.6, 0.04, MAT.tapestry, tx, fy + 2.15, -(TW - 1.08));
+    box(1.75, 2.75, 0.03, MAT.gold, tx, fy + 2.15, -(TW - 1.11));
+  }
+
+  // Armor stands
+  armorStand(-6.5, fy, -6.5, Math.PI * 0.12);
+  armorStand(6.5, fy, -6.5, -Math.PI * 0.12);
+
+  // Side tables
+  tableFn(-(TW - 2), fy, 4, 1.35, 0.55, 0.74, Math.PI / 2);
+  tableFn(TW - 2, fy, 4, 1.35, 0.55, 0.74, Math.PI / 2);
+  candelabra(-(TW - 2), fy + 0.78, 4, 1.05);
+  candelabra(TW - 2, fy + 0.78, 4, 1.05);
+
+  // Portraits on E & W walls
+  for (const pz of [-6, -2, 2]) {
+    portrait(TW - 1.08, fy + 2.2, pz, Math.PI / 2);
+    portrait(-(TW - 1.08), fy + 2.2, pz, -Math.PI / 2);
+  }
+
+  // Torches
+  addTorch(-3.8, fy + 2.2, -5.3, 1.5);
+  addTorch(3.8, fy + 2.2, -5.3, 1.5);
+  addTorch(-3.8, fy + 2.2, 1.8, 1.5);
+  addTorch(3.8, fy + 2.2, 1.8, 1.5);
+  addTorch(0, fy + 2.5, -(TW - 1.2), 2.0, 14);
+
+  // Cobwebs
+  cobweb(-6.5, fy + 4.3, -8.5, 1.6, Math.PI / 4);
+  cobweb(6.5, fy + 4.3, -8.5, 1.6, -Math.PI / 4);
+
+  // Staircase
+  buildStairs(fy, fy + FH);
+  addDoor(STAIR_X0 - 0.04, fy, STAIR_Z1 - 0.04, 0);
+}
+
+// ── ROOF ──────────────────────────────────────────────────────────
+{
+  const fy = FH * 4;
+  const roofSlab = box(TW * 2 + WT * 2, FT, TW * 2 + WT * 2, MAT.dstone, 0, fy + FT / 2, 0);
+  walkable.push(roofSlab);
+
+  // Parapet low wall
+  box(TW * 2 + WT * 2, 0.55, WT, MAT.dstone, 0, fy + 0.55 / 2 + FT, -(TW + WT / 2));
+  box(TW * 2 + WT * 2, 0.55, WT, MAT.dstone, 0, fy + 0.55 / 2 + FT, TW + WT / 2);
+  box(WT, 0.55, TW * 2 + WT * 2, MAT.dstone, TW + WT / 2, fy + 0.55 / 2 + FT, 0);
+  box(WT, 0.55, TW * 2 + WT * 2, MAT.dstone, -(TW + WT / 2), fy + 0.55 / 2 + FT, 0);
+
+  // Crenellations on all four sides
+  const mW = 1.2, mH = 0.9, mD = 1.0;
+  for (let i = -(TW); i <= TW; i += 2.5) {
+    box(mW, mH, mD, MAT.dstone, i, fy + FT + 0.55 + mH / 2, -(TW + WT / 2));
+    box(mW, mH, mD, MAT.dstone, i, fy + FT + 0.55 + mH / 2, TW + WT / 2);
+    box(mD, mH, mW, MAT.dstone, TW + WT / 2, fy + FT + 0.55 + mH / 2, i);
+    box(mD, mH, mW, MAT.dstone, -(TW + WT / 2), fy + FT + 0.55 + mH / 2, i);
+  }
+
+  // Roof torches
+  for (const [tx, tz] of [[-7, -7], [7, -7], [-7, 7], [7, 7]]) {
+    addTorch(tx, fy + FT + 0.7, tz, 2.0, 16);
+  }
+
+  // Stairwell access (final stairs going up to roof)
+  buildStairs(FH * 3, fy);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Player state & input
+// ─────────────────────────────────────────────────────────────────
+const keys = {};
+let isRunning = false, isSneaking = false;
+let playerFloorY = 0;     // current ground Y under player
+let playerVelY   = 0;     // vertical velocity (for gravity)
+let onGround     = false;
+
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'ShiftLeft'   || e.code === 'ShiftRight')   isRunning  = true;
+  if (e.code === 'ControlLeft' || e.code === 'ControlRight') isSneaking = true;
+  if (e.code === 'KeyE') tryInteract();
+});
+document.addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (e.code === 'ShiftLeft'   || e.code === 'ShiftRight')   isRunning  = false;
+  if (e.code === 'ControlLeft' || e.code === 'ControlRight') isSneaking = false;
+});
+
+// ─────────────────────────────────────────────────────────────────
+// Interaction
+// ─────────────────────────────────────────────────────────────────
+const promptEl   = document.getElementById('prompt');
+let   nearAction = null;
+
+function checkNearInteractable() {
+  const cp = camera.position;
+  let bestDist = Infinity, best = null;
+  for (const ia of interactList) {
+    const d = cp.distanceTo(ia.pos);
+    if (d < ia.range && d < bestDist) { bestDist = d; best = ia; }
+  }
+  nearAction = best;
+  promptEl.style.opacity = best ? '1' : '0';
+  if (best) promptEl.textContent = 'Press E to open / close';
+}
+
+function tryInteract() {
+  if (controls.isLocked && nearAction) nearAction.onUse();
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Ground detection (downward raycast)
+// ─────────────────────────────────────────────────────────────────
+const dRay = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0), 0, 4);
+function groundY(x, y, z) {
+  dRay.ray.origin.set(x, y + 0.5, z);
+  const hits = dRay.intersectObjects(walkable, false);
+  return hits.length > 0 ? hits[0].point.y : -99;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Floor name lookup
+// ─────────────────────────────────────────────────────────────────
+const floorNames = [
+  [FH * 4 - 0.5, 'The Rooftop'],
+  [FH * 3 - 0.5, 'IV — The Throne Room'],
+  [FH * 2 - 0.5, 'III — The Laboratory'],
+  [FH     - 0.5, 'II — The Library'],
+  [       -0.5,  'I — The Entrance Hall'],
+];
+function getFloorName(y) {
+  for (const [threshold, name] of floorNames) {
+    if (y > threshold) return name;
+  }
+  return 'Courtyard';
+}
+
+// ─────────────────────────────────────────────────────────────────
+// UI refs
+// ─────────────────────────────────────────────────────────────────
+const floorNameEl = document.getElementById('floor-name');
+const moveModeEl  = document.getElementById('move-mode');
+const pauseEl     = document.getElementById('pause-msg');
+
+// ─────────────────────────────────────────────────────────────────
+// Overlay & pointer lock
+// ─────────────────────────────────────────────────────────────────
+document.getElementById('enter-btn').addEventListener('click', () => {
+  controls.lock();
+});
+controls.addEventListener('lock', () => {
+  document.getElementById('overlay').style.display = 'none';
+  pauseEl.style.display = 'none';
+});
+controls.addEventListener('unlock', () => {
+  pauseEl.style.display = 'flex';
+});
+pauseEl.addEventListener('click', () => { controls.lock(); });
+
+// ─────────────────────────────────────────────────────────────────
+// Animation loop
+// ─────────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+let headBobT = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t  = clock.elapsedTime;
+
+  // ── Torch flicker ──
+  for (const tf of torchFlicker) {
+    const flicker = 1 + Math.sin(t * 8.3 + tf.base * 17) * 0.12
+                      + Math.sin(t * 17.1 + tf.base * 3) * 0.06;
+    tf.light.intensity = tf.base * flicker;
+    tf.flame.scale.setScalar(0.9 + Math.sin(t * 11 + tf.base * 5) * 0.1);
+  }
+
+  // ── Door animation ──
+  for (const d of doors) {
+    const diff = d.targetRot - d.pivot.rotation.y;
+    if (Math.abs(diff) > 0.001) {
+      d.pivot.rotation.y += diff * Math.min(dt * 5, 1);
+    }
+  }
+
+  if (controls.isLocked) {
+    // ── Movement ──
+    const speed = isSneaking ? SNEAK_SPD : (isRunning ? RUN_SPD : WALK_SPD);
+
+    const fwd   = new THREE.Vector3();
+    camera.getWorldDirection(fwd);
+    fwd.y = 0; fwd.normalize();
+    const right = new THREE.Vector3();
+    right.crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
+
+    const move = new THREE.Vector3();
+    if (keys['KeyW'] || keys['ArrowUp'])    move.addScaledVector(fwd,    1);
+    if (keys['KeyS'] || keys['ArrowDown'])  move.addScaledVector(fwd,   -1);
+    if (keys['KeyA'] || keys['ArrowLeft'])  move.addScaledVector(right, -1);
+    if (keys['KeyD'] || keys['ArrowRight']) move.addScaledVector(right,  1);
+
+    const moving = move.lengthSq() > 0;
+    if (moving) move.normalize().multiplyScalar(speed * dt);
+
+    // Sliding collision
+    const cp = camera.position;
+    const cy = cp.y - PLAYER_H;   // feet Y
+
+    // Try X move
+    const nx = cp.x + move.x;
+    if (!hits(nx, cy, cp.z)) cp.x = nx;
+
+    // Try Z move
+    const nz = cp.z + move.z;
+    if (!hits(cp.x, cy, nz)) cp.z = nz;
+
+    // ── Gravity / ground snap ──
+    const gy = groundY(cp.x, cp.y, cp.z);
+    if (gy > -50) {
+      const targetEyeY = gy + PLAYER_H;
+      if (cp.y > targetEyeY + 0.02) {
+        playerVelY -= 18 * dt;
+        cp.y += playerVelY * dt;
+        if (cp.y < targetEyeY) { cp.y = targetEyeY; playerVelY = 0; }
+      } else {
+        cp.y = targetEyeY;
+        playerVelY = 0;
+      }
+    }
+
+    // ── Head bob ──
+    if (moving) {
+      const bobFreq = isSneaking ? 4.0 : (isRunning ? 11.0 : 7.0);
+      const bobAmp  = isSneaking ? 0.018 : (isRunning ? 0.055 : 0.028);
+      headBobT += dt * bobFreq;
+      camera.position.y += Math.sin(headBobT) * bobAmp;
+    }
+
+    // ── Sneak cosmetic tilt ──
+    // subtle forward tilt when sneaking
+    camera.rotation.x = isSneaking
+      ? THREE.MathUtils.lerp(camera.rotation.x, -0.08, 0.1)
+      : THREE.MathUtils.lerp(camera.rotation.x, 0, 0.04);
+
+    // ── Interaction check ──
+    checkNearInteractable();
+
+    // ── HUD ──
+    floorNameEl.textContent = getFloorName(cp.y);
+    moveModeEl.textContent  = isSneaking ? '🐾 Sneaking' : (isRunning ? '💨 Running' : '🚶 Walking');
+  }
+
+  renderer.render(scene, camera);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Resize
+// ─────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+animate();
+</script>
+</body>
+</html>
