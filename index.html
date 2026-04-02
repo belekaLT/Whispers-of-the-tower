@@ -66,7 +66,7 @@ canvas { display: block; }
   display: none; align-items: center; justify-content: center;
   color: #888; font-size: 1.4em;
   background: rgba(0,0,0,0.55); z-index: 50;
-  pointer-events: none;
+  cursor: pointer;
 }
 </style>
 <script type="importmap">
@@ -89,7 +89,7 @@ canvas { display: block; }
     <div><span>Mouse</span> — Look</div>
     <div><span>Shift</span> — Run</div>
     <div><span>Ctrl</span> — Sneak</div>
-    <div><span>E</span> — Interact / Open doors</div>
+    <div><span>E / LMB</span> — Interact / Open doors</div>
     <div><span>Esc</span> — Pause</div>
   </div>
   <button id="enter-btn">ENTER THE TOWER</button>
@@ -1134,7 +1134,7 @@ function checkNearInteractable() {
   }
   nearAction = best;
   promptEl.style.opacity = best ? '1' : '0';
-  if (best) promptEl.textContent = 'Press E to open / close';
+  if (best) promptEl.textContent = 'Press E or LMB to open / close';
 }
 
 function tryInteract() {
@@ -1179,7 +1179,13 @@ const pauseEl     = document.getElementById('pause-msg');
 // Overlay & pointer lock
 // ─────────────────────────────────────────────────────────────────
 document.getElementById('enter-btn').addEventListener('click', () => {
-  controls.lock();
+  const lock = canvas.requestPointerLock();
+  if (lock instanceof Promise) {
+    lock.catch(() => {
+      document.getElementById('overlay').style.display = 'none';
+      pauseEl.style.display = 'none';
+    });
+  }
 });
 controls.addEventListener('lock', () => {
   document.getElementById('overlay').style.display = 'none';
@@ -1188,7 +1194,14 @@ controls.addEventListener('lock', () => {
 controls.addEventListener('unlock', () => {
   pauseEl.style.display = 'flex';
 });
-pauseEl.addEventListener('click', () => { controls.lock(); });
+pauseEl.addEventListener('click', () => {
+  const lock = canvas.requestPointerLock();
+  if (lock instanceof Promise) lock.catch(() => { /* stay paused if lock is denied */ });
+});
+
+document.addEventListener('mousedown', e => {
+  if (e.button === 0 && controls.isLocked) tryInteract();
+});
 
 // ─────────────────────────────────────────────────────────────────
 // Animation loop
