@@ -1179,11 +1179,11 @@ const pauseEl     = document.getElementById('pause-msg');
 // Overlay & pointer lock
 // ─────────────────────────────────────────────────────────────────
 document.getElementById('enter-btn').addEventListener('click', () => {
+  document.getElementById('overlay').style.display = 'none';
   const lock = canvas.requestPointerLock();
   if (lock instanceof Promise) {
     lock.catch(() => {
-      document.getElementById('overlay').style.display = 'none';
-      pauseEl.style.display = 'none';
+      pauseEl.style.display = 'flex';
     });
   }
 });
